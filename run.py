@@ -8,10 +8,11 @@ from argparse import ArgumentParser
 from time import gmtime, strftime
 from shutil import copy
 
-from frames_dataset import FramesDataset
+# from frames_dataset import FramesDataset
+from data_loader.vfhq_dataset import VFHQDataset
 import pdb
 # from modules.generator import OcclusionAwareGenerator
-import modules.generator as generator
+import modules.generator as gen_module
 from modules.discriminator import MultiScaleDiscriminator
 # from modules.keypoint_detector import KPDetector
 import modules.keypoint_detector as KPD
@@ -27,8 +28,7 @@ import random
 import numpy as np
 
 
-if __name__ == "__main__":
-    
+def main(rank, world_size):
     if sys.version_info[0] < 3:
         raise Exception("You must use Python 3 or higher. Recommended version is Python 3.7")
     
@@ -37,10 +37,9 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="train", choices=["train", "reconstruction", "animate"])
     parser.add_argument("--log_dir", default='log', help="path to log into")
     parser.add_argument("--checkpoint", default=None, help="path to checkpoint to restore")
-    parser.add_argument("--device_ids", default="0", type=lambda x: list(map(int, x.split(','))),
-                        help="Names of the devices comma separated.")
+    # parser.add_argument("--device_ids", default="0", type=lambda x: list(map(int, x.split(','))),
+    #                     help="Names of the devices comma separated.")
     parser.add_argument("--verbose", dest="verbose", action="store_true", help="Print model architecture")
-    parser.add_argument("--local_rank", type=int)
     parser.add_argument("--use_depth",action='store_true',help='depth mode')
     parser.add_argument("--rgbd",action='store_true',help='rgbd mode')
     parser.add_argument("--kp_prior",action='store_true',help='use kp_prior in final objective function')
@@ -60,7 +59,7 @@ if __name__ == "__main__":
     parser.set_defaults(verbose=False)
     opt = parser.parse_args()
     with open(opt.config) as f:
-        config = yaml.load(f)
+        config = yaml.load(f, Loader=yaml.FullLoader)
 
     if opt.checkpoint is not None:
         log_dir = os.path.join(*os.path.split(opt.checkpoint)[:-1])
@@ -71,9 +70,8 @@ if __name__ == "__main__":
 
     print("Training...")
 
-    dist.init_process_group(backend='nccl', init_method='env://') 
-    torch.cuda.set_device(opt.local_rank)
-    device=torch.device("cuda",opt.local_rank)
+    device=torch.device("cuda",rank)
+    torch.cuda.set_device(device)
     config['train_params']['loss_weights']['depth_constraint'] = opt.depth_constraint
     config['train_params']['loss_weights']['kp_distance'] = opt.kp_distance
     if opt.kp_prior:
@@ -84,7 +82,7 @@ if __name__ == "__main__":
     if opt.kp_num != -1:
         config['model_params']['common_params']['num_kp'] = opt.kp_num
     # create generator
-    generator = getattr(generator, opt.generator)(**config['model_params']['generator_params'],
+    generator = getattr(gen_module, opt.generator)(**config['model_params']['generator_params'],
                                         **config['model_params']['common_params'])
     generator.to(device)
     if opt.verbose:
@@ -113,11 +111,15 @@ if __name__ == "__main__":
         print(kp_detector)
     kp_detector= torch.nn.SyncBatchNorm.convert_sync_batchnorm(kp_detector)
 
-    kp_detector = DDP(kp_detector,device_ids=[opt.local_rank],broadcast_buffers=False)
-    discriminator = DDP(discriminator,device_ids=[opt.local_rank],broadcast_buffers=False)
-    generator = DDP(generator,device_ids=[opt.local_rank],broadcast_buffers=False)
+    kp_detector = DDP(kp_detector,device_ids=[rank],broadcast_buffers=False)
+    discriminator = DDP(discriminator,device_ids=[rank],broadcast_buffers=False)
+    generator = DDP(generator,device_ids=[rank],broadcast_buffers=False)
 
-    dataset = FramesDataset(is_train=(opt.mode == 'train'), **config['dataset_params'])
+    # dataset = FramesDataset(is_train=(opt.mode == 'train'), **config['dataset_params'])
+    dataset = VFHQDataset(
+        config['dataset_params']['root_dir'],
+        split='train',
+    )
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
     if not os.path.exists(os.path.join(log_dir, os.path.basename(opt.config))):
@@ -127,4 +129,13 @@ if __name__ == "__main__":
         os.makedirs(os.path.join(log_dir,'log'))
     writer = SummaryWriter(os.path.join(log_dir,'log'))
     if opt.mode == 'train':
-        train(config, generator, discriminator, kp_detector, opt.checkpoint, log_dir, dataset, opt.local_rank,device,opt,writer)
+        train(config, generator, discriminator, kp_detector, opt.checkpoint, log_dir, dataset, rank, device,opt,writer)
+
+if __name__ == "__main__":
+    world_size = int(os.environ['WORLD_SIZE'])
+    rank = int(os.environ['RANK'])
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    main(rank, world_size)
+    dist.destroy_process_group()
+
+    
