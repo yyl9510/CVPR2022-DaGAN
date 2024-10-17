@@ -45,12 +45,12 @@ def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, da
     
     generator_full = getattr(MODEL,opt.GFM)(kp_detector, generator, discriminator, train_params,opt)
     discriminator_full = DiscriminatorFullModel(kp_detector, generator, discriminator, train_params)
-    test_dataset = EvaluationDataset(dataroot='/data/fhongac/origDataset/vox1_frames',pairs_list='data/vox_evaluation.csv')
-    test_dataloader = torch.utils.data.DataLoader(
-            test_dataset,
-            batch_size = 1,
-            shuffle=False,
-            num_workers=4)
+    # test_dataset = EvaluationDataset(dataroot='/data/fhongac/origDataset/vox1_frames',pairs_list='data/vox_evaluation.csv')
+    # test_dataloader = torch.utils.data.DataLoader(
+    #         test_dataset,
+    #         batch_size = 1,
+    #         shuffle=False,
+    #         num_workers=4)
     with Logger(log_dir=log_dir, visualizer_params=config['visualizer_params'], checkpoint_freq=train_params['checkpoint_freq']) as logger:
         for epoch in trange(start_epoch, train_params['num_epochs']):
             #parallel
@@ -103,15 +103,15 @@ def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, da
                                      'optimizer_generator': optimizer_generator,
                                      'optimizer_discriminator': optimizer_discriminator,
                                      'optimizer_kp_detector': optimizer_kp_detector}, inp=x, out=generated)
-            generator.eval(), discriminator.eval(), kp_detector.eval()
-            if (epoch + 1) % train_params['checkpoint_freq'] == 0:
-                epoch_eval_loss = 0
-                for i, data in tqdm(enumerate(test_dataloader)):
-                    data['source'] = data['source'].cuda()
-                    data['driving'] = data['driving'].cuda()
-                    losses_generator, generated = generator_full(data) 
-                    loss_values = [val.mean() for val in losses_generator.values()]
-                    loss = sum(loss_values)
-                    epoch_eval_loss+=loss.item()
-                epoch_eval_loss = epoch_eval_loss/len(test_dataloader)
-                writer.add_scalar('epoch_eval_loss', epoch_eval_loss, epoch)
+            # generator.eval(), discriminator.eval(), kp_detector.eval()
+            # if (epoch + 1) % train_params['checkpoint_freq'] == 0:
+            #     epoch_eval_loss = 0
+            #     for i, data in tqdm(enumerate(test_dataloader)):
+            #         data['source'] = data['source'].cuda()
+            #         data['driving'] = data['driving'].cuda()
+            #         losses_generator, generated = generator_full(data) 
+            #         loss_values = [val.mean() for val in losses_generator.values()]
+            #         loss = sum(loss_values)
+            #         epoch_eval_loss+=loss.item()
+            #     epoch_eval_loss = epoch_eval_loss/len(test_dataloader)
+            #     writer.add_scalar('epoch_eval_loss', epoch_eval_loss, epoch)
