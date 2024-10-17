@@ -37,7 +37,7 @@ def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, da
     scheduler_kp_detector = MultiStepLR(optimizer_kp_detector, train_params['epoch_milestones'], gamma=0.1,
                                         last_epoch=-1 + start_epoch * (train_params['lr_kp_detector'] != 0))
 
-    if 'num_repeats' in train_params or train_params['num_repeats'] != 1:
+    if 'num_repeats' in train_params and train_params['num_repeats'] != 1:
         dataset = DatasetRepeater(dataset, train_params['num_repeats'])
     sampler = torch.utils.data.distributed.DistributedSampler(dataset,num_replicas=torch.cuda.device_count(),rank=rank)
     dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], shuffle=False, num_workers=16,sampler=sampler, drop_last=True)
