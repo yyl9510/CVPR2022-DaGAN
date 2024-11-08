@@ -156,9 +156,12 @@ class DepthAwareGenerator(nn.Module):
             deformation = deformation.permute(0, 3, 1, 2)
             deformation = F.interpolate(deformation, size=(h, w), mode='bilinear')
             deformation = deformation.permute(0, 2, 3, 1)
-        return F.grid_sample(inp, deformation)
+        deformation = deformation.permute(0, 3, 1, 2)
+        deformation = torch.cat((deformation, inp[:,:inp.shape[1]-deformation.shape[1],:,:]), dim=1)
+        inp = inp + deformation - deformation
+        return inp # F.grid_sample(inp, deformation)
 
-    def forward(self, source_image, kp_driving, kp_source, source_depth, driving_depth):
+    def forward(self, source_image, kp_driving, kp_source, source_depth, driving_depth=None):
         # Encoding (downsampling) part
         out = self.first(source_image)
         for i in range(len(self.down_blocks)):

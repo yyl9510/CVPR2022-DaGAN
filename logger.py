@@ -89,19 +89,25 @@ class Logger:
             self.save_cpk()
         self.log_file.close()
 
-    def log_iter(self, losses):
+    def log_iter(self, losses, iter_num=None):
         losses = collections.OrderedDict(losses.items())
         if self.names is None:
             self.names = list(losses.keys())
         self.loss_list.append(list(losses.values()))
+        if hasattr(self, 'writer'):
+            for key, value in losses.items():
+                self.writer.add_scalar(key, value, iter_num)
 
-    def log_epoch(self, epoch, models, inp, out):
+    def log_epoch(self, epoch, models, inp=None, out=None):
         self.epoch = epoch
         self.models = models
         if (self.epoch + 1) % self.checkpoint_freq == 0:
             self.save_cpk()
         self.log_scores(self.names)
         # self.visualize_rec(inp, out)
+    
+    def register_tensorboard_writer(self, writer):
+        self.writer = writer
 
 
 class Visualizer:

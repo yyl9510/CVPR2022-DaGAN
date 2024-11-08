@@ -11,17 +11,40 @@ from torch.optim.lr_scheduler import MultiStepLR
 from torch.nn.parallel import DistributedDataParallel as DDP
 import pdb
 from sync_batchnorm import DataParallelWithCallback
-from evaluation_dataset import EvaluationDataset
 
 from frames_dataset import DatasetRepeater
+from nnscaler.parallel import build_optimizer
+from data.dataset import VDataset
 
 
-def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, dataset, rank,device,opt,writer):
+
+def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, dataset, rank, device, opt, writer=None):
     train_params = config['train_params']
 
-    optimizer_generator = torch.optim.Adam(generator.parameters(), lr=train_params['lr_generator'], betas=(0.5, 0.999))
-    optimizer_discriminator = torch.optim.Adam(discriminator.parameters(), lr=train_params['lr_discriminator'], betas=(0.5, 0.999))
-    optimizer_kp_detector = torch.optim.Adam(kp_detector.parameters(), lr=train_params['lr_kp_detector'], betas=(0.5, 0.999))
+    if config['backend_params']['backend_name'] == "cube":
+        optimizer_generator = build_optimizer(
+            generator,
+            torch.optim.Adam,
+            lr=train_params['lr_generator'],
+            betas=(0.5, 0.999),
+        )
+        optimizer_discriminator = build_optimizer(
+            discriminator,
+            torch.optim.Adam,
+            lr=train_params['lr_discriminator'],
+            betas=(0.5, 0.999),
+        )
+        optimizer_kp_detector = build_optimizer(
+            kp_detector,
+            torch.optim.Adam,
+            lr=train_params['lr_kp_detector'],
+            betas=(0.5, 0.999),
+        )
+        scale_factor = 1.0 / (config["backend_params"]["runtime_ngpus"] / config["backend_params"]["plan_ngpus"])
+    else:
+        optimizer_generator = torch.optim.Adam(generator.parameters(), lr=train_params['lr_generator'], betas=(0.5, 0.999))
+        optimizer_discriminator = torch.optim.Adam(discriminator.parameters(), lr=train_params['lr_discriminator'], betas=(0.5, 0.999))
+        optimizer_kp_detector = torch.optim.Adam(kp_detector.parameters(), lr=train_params['lr_kp_detector'], betas=(0.5, 0.999))
 
     if checkpoint is not None:
         start_epoch = Logger.load_cpk(checkpoint, generator, discriminator, kp_detector,
@@ -39,26 +62,24 @@ def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, da
 
     if 'num_repeats' in train_params and train_params['num_repeats'] != 1:
         dataset = DatasetRepeater(dataset, train_params['num_repeats'])
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset,num_replicas=torch.cuda.device_count(),rank=rank)
-    dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], shuffle=False, num_workers=16,sampler=sampler, drop_last=True)
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=torch.cuda.device_count(), shuffle=True, rank=rank)
+    dataloader = DataLoader(dataset, batch_size=train_params['batch_size'], num_workers=16, sampler=sampler, drop_last=True)
 
-    
-    generator_full = getattr(MODEL,opt.GFM)(kp_detector, generator, discriminator, train_params,opt)
-    discriminator_full = DiscriminatorFullModel(kp_detector, generator, discriminator, train_params)
-    # test_dataset = EvaluationDataset(dataroot='/data/fhongac/origDataset/vox1_frames',pairs_list='data/vox_evaluation.csv')
-    # test_dataloader = torch.utils.data.DataLoader(
-    #         test_dataset,
-    #         batch_size = 1,
-    #         shuffle=False,
-    #         num_workers=4)
+    generator_full = getattr(MODEL,opt.GFM)(kp_detector, generator, discriminator, config, opt)
+    discriminator_full = DiscriminatorFullModel(kp_detector, generator, discriminator, config)
+    test_dataset = VDataset(is_train=True)
+    test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=torch.cuda.device_count(), rank=rank)
+    test_dataloader = DataLoader(test_dataset, batch_size=train_params['batch_size'], shuffle=False, num_workers=8, sampler=test_sampler)
+
     with Logger(log_dir=log_dir, visualizer_params=config['visualizer_params'], checkpoint_freq=train_params['checkpoint_freq']) as logger:
+        logger.register_tensorboard_writer(writer)
         for epoch in trange(start_epoch, train_params['num_epochs']):
             #parallel
             sampler.set_epoch(epoch)
             total = len(dataloader)
             epoch_train_loss = 0
             generator.train(), discriminator.train(), kp_detector.train()
-            with tqdm(total=total) as par:
+            with tqdm(total=total, position=rank, desc=f"Rank {rank}, Epoch {epoch}", leave=True) as par:
                 for i,x in enumerate(dataloader):
                     x['source'] = x['source'].to(device)
                     x['driving'] = x['driving'].to(device)
@@ -67,6 +88,11 @@ def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, da
                     loss_values = [val.mean() for val in losses_generator.values()]
                     loss = sum(loss_values)
                     loss.backward()
+                    if config['backend_params']['backend_name'] == "cube":
+                        optimizer_generator.sync_shard_grad()
+                        optimizer_kp_detector.sync_shard_grad()
+                        optimizer_generator.scale_grads(scale_factor)
+                        optimizer_kp_detector.scale_grads(scale_factor)
                     optimizer_generator.step()
                     optimizer_generator.zero_grad()
                     optimizer_kp_detector.step()
@@ -80,6 +106,9 @@ def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, da
                         loss = sum(loss_values)
 
                         loss.backward()
+                        if config['backend_params']['backend_name'] == "cube":
+                            optimizer_discriminator.sync_shard_grad()
+                            optimizer_discriminator.scale_grads(scale_factor)
                         optimizer_discriminator.step()
                         optimizer_discriminator.zero_grad()
                     else:
@@ -89,29 +118,38 @@ def train(config, generator, discriminator, kp_detector, checkpoint, log_dir, da
                     losses = {key: value.mean().detach().data.cpu().numpy() for key, value in losses_generator.items()}
                     # for k,v in losses.items():
                     #     writer.add_scalar(k, v, total*epoch+i)
-                    logger.log_iter(losses=losses)
+                    if rank == 0:
+                        logger.log_iter(losses=losses, iter_num=i+len(dataloader)*epoch)
                     par.update(1)
+                    torch.distributed.barrier()
             epoch_train_loss = epoch_train_loss/total
             if (epoch + 1) % train_params['checkpoint_freq'] == 0:
-                writer.add_scalar('epoch_train_loss', epoch_train_loss, epoch)
+                if rank == 0:
+                    writer.add_scalar('epoch_train_loss', epoch_train_loss, epoch)
             scheduler_generator.step()
             scheduler_discriminator.step()
             scheduler_kp_detector.step()
-            logger.log_epoch(epoch, {'generator': generator,
-                                     'discriminator': discriminator,
-                                     'kp_detector': kp_detector,
-                                     'optimizer_generator': optimizer_generator,
-                                     'optimizer_discriminator': optimizer_discriminator,
-                                     'optimizer_kp_detector': optimizer_kp_detector}, inp=x, out=generated)
-            # generator.eval(), discriminator.eval(), kp_detector.eval()
-            # if (epoch + 1) % train_params['checkpoint_freq'] == 0:
-            #     epoch_eval_loss = 0
-            #     for i, data in tqdm(enumerate(test_dataloader)):
-            #         data['source'] = data['source'].cuda()
-            #         data['driving'] = data['driving'].cuda()
-            #         losses_generator, generated = generator_full(data) 
-            #         loss_values = [val.mean() for val in losses_generator.values()]
-            #         loss = sum(loss_values)
-            #         epoch_eval_loss+=loss.item()
-            #     epoch_eval_loss = epoch_eval_loss/len(test_dataloader)
-            #     writer.add_scalar('epoch_eval_loss', epoch_eval_loss, epoch)
+            if rank == 0:
+                logger.log_epoch(epoch, {'generator': generator,
+                                        'discriminator': discriminator,
+                                        'kp_detector': kp_detector,
+                                        'optimizer_generator': optimizer_generator,
+                                        'optimizer_discriminator': optimizer_discriminator,
+                                        'optimizer_kp_detector': optimizer_kp_detector}, inp=x, out=generated)
+            generator.eval(), discriminator.eval(), kp_detector.eval()
+            if (epoch + 1) % train_params['checkpoint_freq'] == 0:
+                epoch_eval_loss = 0
+                for i, data in tqdm(enumerate(test_dataloader), position=rank, desc=f"Rank {rank}", leave=True):
+                    data['source'] = data['source'].cuda()
+                    data['driving'] = data['driving'].cuda()
+                    losses_generator, generated = generator_full(data) 
+                    loss_values = [val.mean() for val in losses_generator.values()]
+                    loss = sum(loss_values)
+                    epoch_eval_loss+=loss.item()
+                epoch_eval_loss = torch.tensor(epoch_eval_loss).cuda()
+                gather_epoch_eval_loss = [torch.zeros_like(epoch_eval_loss) for _ in range(torch.distributed.get_world_size())]
+                torch.distributed.all_gather(gather_epoch_eval_loss, epoch_eval_loss)
+                gathered_epoch_eval_loss = torch.mean(torch.tensor(gather_epoch_eval_loss)).item()
+                epoch_eval_loss = gathered_epoch_eval_loss / len(test_dataloader)
+                if rank == 0:
+                    logger.log_iter({'epoch_eval_loss': epoch_eval_loss}, epoch)

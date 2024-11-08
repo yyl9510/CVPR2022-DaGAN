@@ -130,19 +130,19 @@ class GeneratorFullModel(torch.nn.Module):
     Merge all generator related updates into single model for better multi-gpu usage
     """
 
-    def __init__(self, kp_extractor, generator, discriminator, train_params,opt):
+    def __init__(self, kp_extractor, generator, discriminator, config, opt):
         super(GeneratorFullModel, self).__init__()
         self.kp_extractor = kp_extractor
         self.generator = generator
         self.discriminator = discriminator
-        self.train_params = train_params
-        self.scales = train_params['scales']
-        self.disc_scales = self.discriminator.module.scales
-        self.pyramid = ImagePyramide(self.scales, generator.module.num_channels)
+        self.train_params = config['train_params']
+        self.scales = self.train_params['scales']
+        self.disc_scales = config['model_params']['discriminator_params']['scales']
+        self.pyramid = ImagePyramide(self.scales, config['model_params']['common_params']['num_channels'])
         if torch.cuda.is_available():
             self.pyramid = self.pyramid.cuda()
         self.opt = opt
-        self.loss_weights = train_params['loss_weights']
+        self.loss_weights = self.train_params['loss_weights']
 
         if sum(self.loss_weights['perceptual']) != 0:
             self.vgg = Vgg19()
@@ -150,11 +150,11 @@ class GeneratorFullModel(torch.nn.Module):
                 self.vgg = self.vgg.cuda()
         self.depth_encoder = depth.ResnetEncoder(50, False).cuda()
         self.depth_decoder = depth.DepthDecoder(num_ch_enc=self.depth_encoder.num_ch_enc, scales=range(4)).cuda()
-        loaded_dict_enc = torch.load('depth/models/depth_face_model_Voxceleb2_10w/encoder.pth',map_location='cpu')
-        loaded_dict_dec = torch.load('depth/models/depth_face_model_Voxceleb2_10w/depth.pth',map_location='cpu')
-        filtered_dict_enc = {k: v for k, v in loaded_dict_enc.items() if k in self.depth_encoder.state_dict()}
-        self.depth_encoder.load_state_dict(filtered_dict_enc)
-        self.depth_decoder.load_state_dict(loaded_dict_dec)
+        # loaded_dict_enc = torch.load('depth/models/depth_face_model_Voxceleb2_10w/encoder.pth',map_location='cpu')
+        # loaded_dict_dec = torch.load('depth/models/depth_face_model_Voxceleb2_10w/depth.pth',map_location='cpu')
+        # filtered_dict_enc = {k: v for k, v in loaded_dict_enc.items() if k in self.depth_encoder.state_dict()}
+        # self.depth_encoder.load_state_dict(filtered_dict_enc)
+        # self.depth_decoder.load_state_dict(loaded_dict_dec)
         self.set_requires_grad(self.depth_encoder, False) 
         self.set_requires_grad(self.depth_decoder, False) 
         self.depth_decoder.eval()
@@ -190,7 +190,7 @@ class GeneratorFullModel(torch.nn.Module):
         else:
             kp_source = self.kp_extractor(x['source'])
             kp_driving = self.kp_extractor(x['driving'])
-        generated = self.generator(x['source'], kp_source=kp_source, kp_driving=kp_driving, source_depth = depth_source, driving_depth = depth_driving)
+        generated = self.generator(x['source'], kp_source=kp_source, kp_driving=kp_driving, source_depth = depth_source)    # , driving_depth = depth_driving
         generated.update({'kp_source': kp_source, 'kp_driving': kp_driving})
         loss_values = {}
         pyramide_real = self.pyramid(x['driving'])
@@ -324,24 +324,24 @@ class GeneratorFullModel(torch.nn.Module):
         return loss_values, generated
 
 
-
 class DiscriminatorFullModel(torch.nn.Module):
     """
     Merge all discriminator related updates into single model for better multi-gpu usage
     """
 
-    def __init__(self, kp_extractor, generator, discriminator, train_params):
+    def __init__(self, kp_extractor, generator, discriminator, config):
         super(DiscriminatorFullModel, self).__init__()
         self.kp_extractor = kp_extractor
         self.generator = generator
         self.discriminator = discriminator
-        self.train_params = train_params
-        self.scales = self.discriminator.module.scales
-        self.pyramid = ImagePyramide(self.scales, generator.module.num_channels)
+        self.train_params = config['train_params']
+        self.scales = config['model_params']['discriminator_params']['scales']
+
+        self.pyramid = ImagePyramide(self.scales, config['model_params']['common_params']['num_channels'])
         if torch.cuda.is_available():
             self.pyramid = self.pyramid.cuda()
 
-        self.loss_weights = train_params['loss_weights']
+        self.loss_weights = self.train_params['loss_weights']
 
     def forward(self, x, generated):
         pyramide_real = self.pyramid(x['driving'])
